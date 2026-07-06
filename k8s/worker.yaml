@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: riotgraphs-worker }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: riotgraphs-worker } }
+  template:
+    metadata: { labels: { app: riotgraphs-worker } }
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/riotgraphs/worker:latest
+          command: ["pnpm", "worker"]
+          envFrom:
+            - secretRef: { name: riotgraphs-secrets }
+            - configMapRef: { name: riotgraphs-config }
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits:   { cpu: 1000m, memory: 1Gi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: riotgraphs-cron }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: riotgraphs-cron } }
+  template:
+    metadata: { labels: { app: riotgraphs-cron } }
+    spec:
+      containers:
+        - name: cron
+          image: ghcr.io/riotgraphs/worker:latest
+          command: ["pnpm", "cron"]
+          envFrom:
+            - secretRef: { name: riotgraphs-secrets }
+            - configMapRef: { name: riotgraphs-config }

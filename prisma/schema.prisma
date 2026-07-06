@@ -1,0 +1,644 @@
+// RiotGraphs — PostgreSQL OLTP schema (Prisma)
+// Analytics/aggregations live in ClickHouse (see clickhouse/schema.sql)
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [pg_trgm, citext]
+}
+
+// ─────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────
+
+enum Game {
+  LOL
+  TFT
+  VALORANT
+  LOR
+  WILD_RIFT
+}
+
+enum Region {
+  BR1
+  EUN1
+  EUW1
+  JP1
+  KR
+  LA1
+  LA2
+  NA1
+  OC1
+  TR1
+  RU
+  PH2
+  SG2
+  TH2
+  TW2
+  VN2
+  ME1
+}
+
+enum RoutingRegion {
+  AMERICAS
+  EUROPE
+  ASIA
+  SEA
+  ESPORTS
+}
+
+enum PlanTier {
+  FREE
+  PREMIUM
+  PRO
+  API_STARTER
+  API_PRO
+  ENTERPRISE
+}
+
+enum UserRole {
+  USER
+  MODERATOR
+  ADMIN
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  TRIALING
+  UNPAID
+  INCOMPLETE
+}
+
+enum SyncJobStatus {
+  QUEUED
+  RUNNING
+  SUCCESS
+  FAILED
+  RETRYING
+  DEAD
+}
+
+// ─────────────────────────────────────────────────────────────
+// Users, auth, subscriptions
+// ─────────────────────────────────────────────────────────────
+
+model User {
+  id             String    @id @default(cuid())
+  email          String?   @unique
+  emailVerified  DateTime?
+  name           String?
+  image          String?
+  role           UserRole  @default(USER)
+  plan           PlanTier  @default(FREE)
+  stripeCustomer String?   @unique
+  locale         String    @default("en")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  accounts       Account[]
+  sessions       Session[]
+  riotAccounts   RiotAccount[]
+  subscriptions  Subscription[]
+  apiKeys        ApiKey[]
+  favorites      Favorite[]
+  comparisons    ComparisonSnapshot[]
+
+  @@index([plan])
+  @@index([createdAt])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String
+  stripeSubscriptionId String             @unique
+  stripePriceId        String
+  status               SubscriptionStatus
+  plan                 PlanTier
+  currentPeriodEnd     DateTime
+  cancelAtPeriodEnd    Boolean            @default(false)
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+}
+
+model ApiKey {
+  id           String    @id @default(cuid())
+  userId       String
+  name         String
+  keyHash      String    @unique
+  prefix       String    @unique
+  scopes       String[]  @default([])
+  rateLimit    Int       @default(60)
+  active       Boolean   @default(true)
+  lastUsedAt   DateTime?
+  expiresAt    DateTime?
+  createdAt    DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([active])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Riot identity — one player can have multiple game accounts
+// ─────────────────────────────────────────────────────────────
+
+model RiotAccount {
+  id             String        @id @default(cuid())
+  userId         String?
+  puuid          String        @unique
+  gameName       String
+  tagLine        String
+  routing        RoutingRegion
+  region         Region?
+  primaryGame    Game
+  verifiedAt     DateTime?
+  lastSyncedAt   DateTime?
+  syncPriority   Int           @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  summoners      Summoner[]
+  valorantProfile ValorantProfile?
+  tftProfile     TftProfile?
+
+  @@index([userId])
+  @@index([gameName, tagLine])
+  @@index([routing, primaryGame])
+}
+
+// ─────────────────────────────────────────────────────────────
+// League of Legends
+// ─────────────────────────────────────────────────────────────
+
+model Summoner {
+  id             String   @id @default(cuid())
+  riotAccountId  String
+  region         Region
+  summonerId     String
+  accountId      String
+  puuid          String
+  name           String
+  profileIconId  Int
+  summonerLevel  Int
+  revisionDate   BigInt
+  lastSyncedAt   DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  riotAccount    RiotAccount     @relation(fields: [riotAccountId], references: [id], onDelete: Cascade)
+  leagueEntries  LeagueEntry[]
+  championMastery ChampionMastery[]
+  matchParticipations MatchParticipant[]
+
+  @@unique([region, summonerId])
+  @@unique([region, puuid])
+  @@index([name])
+}
+
+model LeagueEntry {
+  id           String   @id @default(cuid())
+  summonerId   String
+  queueType    String
+  tier         String
+  rank         String
+  leaguePoints Int
+  wins         Int
+  losses       Int
+  veteran      Boolean  @default(false)
+  inactive     Boolean  @default(false)
+  freshBlood   Boolean  @default(false)
+  hotStreak    Boolean  @default(false)
+  updatedAt    DateTime @updatedAt
+
+  summoner Summoner @relation(fields: [summonerId], references: [id], onDelete: Cascade)
+
+  @@unique([summonerId, queueType])
+  @@index([tier, rank])
+  @@index([queueType, tier, rank, leaguePoints])
+}
+
+model ChampionMastery {
+  id                     String   @id @default(cuid())
+  summonerId             String
+  championId             Int
+  championLevel          Int
+  championPoints         Int
+  lastPlayTime           BigInt
+  championPointsSinceLastLevel Int
+  championPointsUntilNextLevel Int
+  chestGranted           Boolean
+  tokensEarned           Int
+  updatedAt              DateTime @updatedAt
+
+  summoner Summoner @relation(fields: [summonerId], references: [id], onDelete: Cascade)
+
+  @@unique([summonerId, championId])
+  @@index([championId, championPoints])
+}
+
+model Match {
+  id            String    @id
+  gameId        BigInt
+  routing       RoutingRegion
+  platform      Region
+  queueId       Int
+  gameMode      String
+  gameType      String
+  gameVersion   String
+  patch         String    // e.g. "14.24"
+  mapId         Int
+  gameStartMs   BigInt
+  gameDurationS Int
+  gameEndMs     BigInt?
+  tournamentCode String?
+  raw           Json?
+  createdAt     DateTime  @default(now())
+
+  participants  MatchParticipant[]
+  teams         MatchTeam[]
+  timeline      MatchTimeline?
+
+  @@index([queueId, patch])
+  @@index([patch])
+  @@index([gameStartMs])
+  @@index([platform, queueId])
+}
+
+model MatchTeam {
+  id          String  @id @default(cuid())
+  matchId     String
+  teamId      Int
+  win         Boolean
+  bans        Json
+  objectives  Json
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, teamId])
+}
+
+model MatchParticipant {
+  id                String  @id @default(cuid())
+  matchId           String
+  summonerId        String?
+  puuid             String
+  teamId            Int
+  participantId     Int
+  championId        Int
+  championName      String
+  position          String?
+  lane              String?
+  role              String?
+  win               Boolean
+  kills             Int
+  deaths            Int
+  assists           Int
+  kda               Float
+  csTotal           Int
+  csPerMin          Float
+  goldEarned        Int
+  goldPerMin        Float
+  damageDealt       Int
+  damageDealtToChampions Int
+  damageTaken       Int
+  visionScore       Int
+  wardsPlaced       Int
+  wardsKilled       Int
+  controlWardsBought Int
+  summoner1Id       Int
+  summoner2Id       Int
+  items             Int[]  @default([])
+  perks             Json
+  stats             Json   // full participant stats snapshot
+
+  match     Match     @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  summoner  Summoner? @relation(fields: [summonerId], references: [id], onDelete: SetNull)
+
+  @@index([puuid])
+  @@index([championId, win])
+  @@index([summonerId])
+}
+
+model MatchTimeline {
+  matchId String @id
+  data    Json
+  match   Match  @relation(fields: [matchId], references: [id], onDelete: Cascade)
+}
+
+// ─────────────────────────────────────────────────────────────
+// TFT
+// ─────────────────────────────────────────────────────────────
+
+model TftProfile {
+  id            String   @id @default(cuid())
+  riotAccountId String   @unique
+  summonerId    String?
+  region        Region
+  tier          String?
+  rank          String?
+  leaguePoints  Int      @default(0)
+  wins          Int      @default(0)
+  losses        Int      @default(0)
+  updatedAt     DateTime @updatedAt
+
+  riotAccount RiotAccount @relation(fields: [riotAccountId], references: [id], onDelete: Cascade)
+  matches     TftMatchParticipant[]
+}
+
+model TftMatch {
+  id            String   @id
+  routing       RoutingRegion
+  queueId       Int
+  gameLength    Float
+  gameVariation String?
+  gameVersion   String
+  set           Int
+  patch         String
+  gameStartMs   BigInt
+  raw           Json?
+  createdAt     DateTime @default(now())
+
+  participants TftMatchParticipant[]
+
+  @@index([patch, set])
+}
+
+model TftMatchParticipant {
+  id              String  @id @default(cuid())
+  matchId         String
+  tftProfileId    String?
+  puuid           String
+  placement       Int
+  level           Int
+  goldLeft        Int
+  playersEliminated Int
+  totalDamageToPlayers Int
+  lastRound       Int
+  timeEliminated  Float
+  companion       Json
+  traits          Json
+  units           Json
+  augments        String[] @default([])
+
+  match       TftMatch   @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  tftProfile  TftProfile? @relation(fields: [tftProfileId], references: [id], onDelete: SetNull)
+
+  @@index([puuid])
+  @@index([placement])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Valorant
+// ─────────────────────────────────────────────────────────────
+
+model ValorantProfile {
+  id            String   @id @default(cuid())
+  riotAccountId String   @unique
+  region        String   // na, eu, ap, kr, latam, br
+  currentTier   Int?
+  currentRR     Int?
+  peakTier      Int?
+  updatedAt     DateTime @updatedAt
+
+  riotAccount RiotAccount @relation(fields: [riotAccountId], references: [id], onDelete: Cascade)
+  matches     ValorantMatchParticipant[]
+}
+
+model ValorantMatch {
+  id            String   @id
+  region        String
+  queueId       String
+  mapId         String
+  seasonId      String
+  gameLengthMs  Int
+  gameStartMs   BigInt
+  isRanked      Boolean
+  raw           Json?
+  createdAt     DateTime @default(now())
+
+  participants ValorantMatchParticipant[]
+
+  @@index([mapId, isRanked])
+  @@index([seasonId])
+}
+
+model ValorantMatchParticipant {
+  id            String  @id @default(cuid())
+  matchId       String
+  profileId     String?
+  puuid         String
+  teamId        String
+  agentId       String
+  score         Int
+  roundsPlayed  Int
+  kills         Int
+  deaths        Int
+  assists       Int
+  playtimeMs    Int
+  headshots     Int
+  bodyshots     Int
+  legshots      Int
+  adr           Float
+  hsPct         Float
+  kast          Float?
+  firstBloods   Int
+  clutches      Int
+  won           Boolean
+
+  match    ValorantMatch    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  profile  ValorantProfile? @relation(fields: [profileId], references: [id], onDelete: SetNull)
+
+  @@index([puuid])
+  @@index([agentId, won])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Meta / aggregates cache (materialised from ClickHouse)
+// ─────────────────────────────────────────────────────────────
+
+model ChampionStats {
+  id           String   @id @default(cuid())
+  game         Game     @default(LOL)
+  championId   Int
+  patch        String
+  tier         String   // ALL, IRON, ..., CHALLENGER
+  role         String   // ALL, TOP, JUNGLE, MID, ADC, SUPPORT
+  region       String   // ALL or specific
+  games        Int
+  wins         Int
+  bans         Int
+  picks        Int
+  winRate      Float
+  pickRate     Float
+  banRate      Float
+  avgKda       Float
+  tierScore    Float
+  tierLabel    String   // S+, S, A, B, C, D
+  updatedAt    DateTime @updatedAt
+
+  @@unique([game, championId, patch, tier, role, region])
+  @@index([patch, tier, role])
+  @@index([tierScore])
+}
+
+model TierListSnapshot {
+  id        String   @id @default(cuid())
+  game      Game
+  patch     String
+  tier      String
+  role      String
+  region    String
+  payload   Json
+  createdAt DateTime @default(now())
+
+  @@unique([game, patch, tier, role, region])
+}
+
+model Leaderboard {
+  id        String   @id @default(cuid())
+  game      Game
+  scope     String   // WORLD, REGION:EUW, COUNTRY:ES, CITY:Madrid
+  queueId   String   // e.g. RANKED_SOLO_5x5, TFT_RANKED, VAL_COMPETITIVE
+  patch     String?
+  page      Int      @default(1)
+  entries   Json
+  updatedAt DateTime @updatedAt
+
+  @@unique([game, scope, queueId, page])
+  @@index([game, scope])
+}
+
+model Favorite {
+  id       String @id @default(cuid())
+  userId   String
+  game     Game
+  puuid    String
+  label    String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, game, puuid])
+  @@index([userId])
+}
+
+model ComparisonSnapshot {
+  id        String   @id @default(cuid())
+  userId    String?
+  game      Game
+  puuids    String[]
+  payload   Json
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// AI insights persisted per-player + per-match
+// ─────────────────────────────────────────────────────────────
+
+model AIInsight {
+  id         String   @id @default(cuid())
+  game       Game
+  puuid      String
+  scope      String   // PROFILE, MATCH, TREND
+  refId      String?  // matchId or period identifier
+  summary    String   @db.Text
+  bullets    Json
+  score      Float?
+  model      String
+  createdAt  DateTime @default(now())
+
+  @@index([puuid, game])
+  @@index([scope, refId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Sync jobs & audit
+// ─────────────────────────────────────────────────────────────
+
+model SyncJob {
+  id         String        @id @default(cuid())
+  game       Game
+  jobType    String        // MATCH_HISTORY, RANKED_LADDER, MASTERY, ...
+  target     String        // puuid / summonerId / ladder key
+  routing    RoutingRegion?
+  region     Region?
+  status     SyncJobStatus @default(QUEUED)
+  attempts   Int           @default(0)
+  lastError  String?       @db.Text
+  scheduledAt DateTime     @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  @@index([status, scheduledAt])
+  @@index([game, jobType])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  target    String?
+  meta      Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([actorId])
+  @@index([action, createdAt])
+}

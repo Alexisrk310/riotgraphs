@@ -1,0 +1,67 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: riotgraphs
+      POSTGRES_PASSWORD: riotgraphs
+      POSTGRES_DB: riotgraphs
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U riotgraphs"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports: ["6379:6379"]
+    volumes: [redisdata:/data]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.9-alpine
+    restart: unless-stopped
+    ports: ["8123:8123", "9000:9000"]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - chdata:/var/lib/clickhouse
+      - ./clickhouse/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_started }
+      clickhouse: { condition: service_started }
+    env_file: .env
+    ports: ["3000:3000"]
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    depends_on: [postgres, redis, clickhouse]
+    env_file: .env
+    command: pnpm worker
+    restart: unless-stopped
+
+  cron:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    depends_on: [redis]
+    env_file: .env
+    command: pnpm cron
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  chdata:
