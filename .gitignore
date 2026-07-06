@@ -52,3 +52,5 @@ tsconfig.tsbuildinfo
 
 # Turbopack
 .turbo/
+
+.vercel
